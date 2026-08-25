@@ -1,0 +1,46 @@
+name: CoolFanControl
+options:
+  bundleIdPrefix: com.alpico
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    CODE_SIGN_IDENTITY: "Developer ID Application"
+    DEVELOPMENT_TEAM: "2D7FVQV9WG"
+    CODE_SIGN_STYLE: Manual
+    ENABLE_HARDENED_RUNTIME: YES
+packages:
+  FanControlCore:
+    path: Core
+targets:
+  CoolFanControl:
+    type: application
+    platform: macOS
+    sources: [App/Sources]
+    dependencies:
+      - package: FanControlCore
+    info:
+      path: App/Info.plist
+      properties:
+        LSMinimumSystemVersion: "14.0"
+        CFBundleDisplayName: Cool Fan Control
+        NSPrincipalClass: NSApplication
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.alpico.coolfancontrol
+        ENABLE_APP_SANDBOX: NO   # hardware access — ships outside the MAS by design
+  helperd:
+    type: tool
+    platform: macOS
+    sources: [Helper/Sources]
+    dependencies:
+      - package: FanControlCore
+    settings:
+      base:
+        PRODUCT_NAME: com.alpico.coolfancontrol.helper
+        PRODUCT_BUNDLE_IDENTIFIER: com.alpico.coolfancontrol.helper
+        SKIP_INSTALL: YES
+        ENABLE_APP_SANDBOX: NO
