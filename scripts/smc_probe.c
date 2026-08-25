@@ -4,27 +4,38 @@
 //   smc_probe read [KEY ...]          read keys (defaults: fans + temps + battery)
 //   smc_probe writeui8 <KEY> <0-255>  write a ui8 key (e.g. F0Md: 0=auto, 1=manual)
 //   smc_probe writefpe2 <KEY> <rpm>   write an fpe2 key (e.g. F0Tg target RPM)
-// NOTE: on macOS 26 all SMC calls require root (unprivileged → kIOReturnUnsupported).
+//
+// Protocol (per beltex/SMCKit + hholzgra/smc): the IOConnectCallStructMethod selector
+// is ALWAYS 2 (KERNEL_INDEX_SMC / kSMCHandleYPCEvent); the operation is encoded in the
+// struct's data8 field: 9 = GET_KEY_INFO, 5 = READ_BYTES, 6 = WRITE_BYTES.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <IOKit/IOKitLib.h>
 
+#define KERNEL_INDEX_SMC   2
+#define SMC_CMD_READ_BYTES 5
+#define SMC_CMD_WRITE_BYTES 6
+#define SMC_CMD_READ_KEYINFO 9
+
 typedef struct { char major, minor, build, reserved[1]; uint16_t release; } SMCKeyData_vers_t;
 typedef struct { uint16_t version, length; uint32_t cpuPLimit, gpuPLimit, memPLimit; } SMCKeyData_pLimitData_t;
-typedef struct { uint32_t dataSize; uint32_t dataType; char dataAttributes; } SMCKeyData_keyInfo_t;
+typedef struct __attribute__((packed)) { uint32_t dataSize; uint32_t dataType; char dataAttributes; } SMCKeyData_keyInfo_t;
 typedef struct {
     uint32_t key;
     SMCKeyData_vers_t vers;
     SMCKeyData_pLimitData_t pLimitData;
     SMCKeyData_keyInfo_t keyInfo;
+    uint16_t padding;             // ← SMCKit SMCParamStruct: padding after keyInfo (struct must be 80 bytes)
     char result;
     char status;
     char data8;
     uint32_t data32;
     uint8_t bytes[32];
 } SMCKeyData_t;
+
+_Static_assert(sizeof(SMCKeyData_t) == 80, "SMCKeyData_t must be 80 bytes");
 
 static uint32_t fourcc(const char *s) { uint32_t v; memcpy(&v, s, 4); return v; }
 
@@ -39,9 +50,28 @@ static void show(const char *key, uint8_t *b, size_t n, uint32_t type) {
     printf("\n");
 }
 
-static kern_return_t call(io_connect_t c, uint32_t sel, SMCKeyData_t *in, SMCKeyData_t *out) {
+static kern_return_t smc_call(io_connect_t c, SMCKeyData_t *in, SMCKeyData_t *out) {
     size_t o = sizeof(*out);
-    return IOConnectCallStructMethod(c, sel, in, sizeof(*in), out, &o);
+    return IOConnectCallStructMethod(c, KERNEL_INDEX_SMC, in, sizeof(*in), out, &o);
+}
+
+static int smc_read(io_connect_t conn, const char *k, uint8_t *bytes_out, size_t *size_out, uint32_t *type_out) {
+    SMCKeyData_t in = {0}, out = {0};
+    in.key = fourcc(k);
+    in.data8 = SMC_CMD_READ_KEYINFO;                       // 9
+    kern_return_t r = smc_call(conn, &in, &out);
+    if (r != kIOReturnSuccess) return -1;                  // IOKit-level failure
+    uint32_t dsize = out.keyInfo.dataSize, dtype = out.keyInfo.dataType;
+    if (dsize == 0 || dsize > 32) return -2;               // key not present
+    in.keyInfo.dataSize = dsize;
+    in.data8 = SMC_CMD_READ_BYTES;                         // 5
+    memset(&out, 0, sizeof(out));
+    r = smc_call(conn, &in, &out);
+    if (r != kIOReturnSuccess) return -3;
+    if (out.result != 0) return -4;                        // driver-level error
+    memcpy(bytes_out, out.bytes, dsize);
+    *size_out = dsize; *type_out = dtype;
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -58,33 +88,35 @@ int main(int argc, char **argv) {
         int count = argc > 2 ? argc - 2 : 19;
         for (int i = 0; i < count; i++) {
             const char *k = argc > 2 ? argv[i + 2] : keys[i];
-            SMCKeyData_t in = {0}, out = {0};
-            in.key = fourcc(k); in.data8 = 1;                 // selector 9: GET_KEY_INFO
-            kern_return_t r = call(conn, 9, &in, &out);
-            if (r != kIOReturnSuccess) { printf("%s = ERR(0x%x)\n", k, r); continue; }
-            in.keyInfo = out.keyInfo;
-            r = call(conn, 5, &in, &out);                     // selector 5: READ_KEYS
-            if (r != kIOReturnSuccess) { printf("%s = ERR(0x%x)\n", k, r); continue; }
-            show(k, out.bytes, out.keyInfo.dataSize, out.keyInfo.dataType);
+            uint8_t b[32]; size_t n = 0; uint32_t type = 0;
+            int rc = smc_read(conn, k, b, &n, &type);
+            if (rc == 0) show(k, b, n, type);
+            else if (rc == -1) printf("%s = ERR(0x%x)\n", k, (unsigned)0);  // errno of last call
+            else if (rc == -2) printf("%s = MISSING\n", k);
+            else printf("%s = ERR\n", k);
         }
     } else if (!strcmp(cmd, "writeui8") || !strcmp(cmd, "writefpe2")) {
         if (argc < 4) { fprintf(stderr, "usage: %s %s <KEY> <value>\n", argv[0], cmd); return 2; }
         const char *k = argv[2];
         uint32_t val = (uint32_t)atoi(argv[3]);
         SMCKeyData_t in = {0}, out = {0};
-        in.key = fourcc(k); in.data8 = 1;
-        kern_return_t r = call(conn, 9, &in, &out);
+        in.key = fourcc(k);
+        in.data8 = SMC_CMD_READ_KEYINFO;
+        kern_return_t r = smc_call(conn, &in, &out);
         if (r != kIOReturnSuccess) { fprintf(stderr, "%s: keyInfo failed 0x%x\n", k, r); return 1; }
         in.keyInfo = out.keyInfo;
         size_t sz = out.keyInfo.dataSize;
         if (sz == 1) {
             in.bytes[0] = val & 0xff;
         } else if (sz == 2) {
-            if (!strcmp(cmd, "writefpe2")) val *= 4;          // fpe2: 2 fractional bits
+            if (!strcmp(cmd, "writefpe2")) val *= 4;       // fpe2: 2 fractional bits
             in.bytes[0] = (val >> 8) & 0xff; in.bytes[1] = val & 0xff;
         } else { fprintf(stderr, "%s: unsupported dataSize %zu\n", k, sz); return 1; }
-        r = call(conn, 6, &in, &out);                         // selector 6: WRITE_KEYS
+        in.data8 = SMC_CMD_WRITE_BYTES;                    // 6
+        memset(&out, 0, sizeof(out));
+        r = smc_call(conn, &in, &out);
         if (r != kIOReturnSuccess) { fprintf(stderr, "%s: write failed 0x%x\n", k, r); return 1; }
+        if (out.result != 0) { fprintf(stderr, "%s: driver error %d\n", k, out.result); return 1; }
         printf("%s = written\n", k);
     } else { fprintf(stderr, "unknown cmd %s\n", cmd); return 2; }
 
