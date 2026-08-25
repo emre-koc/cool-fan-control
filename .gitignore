@@ -11,6 +11,9 @@ DerivedData/
 .build/
 .swiftpm/
 
+# Python contract tests
+__pycache__/
+
 # Packaging
 *.dmg
 build/
