@@ -18,23 +18,27 @@ cc -O2 -o "$BIN" "$DIR/smc_probe.c" -framework IOKit -framework CoreFoundation
 fan_val() { "$BIN" read "$1" | awk '{print $NF}'; }
 
 restore_auto() { "$BIN" writeui8 F0Md 0 >/dev/null 2>&1 || true; }
-trap restore_auto EXIT
 
 case "${1:-read}" in
   read)
     shift || true
-    "$BIN" read "${@:-}"
+    if (( $# == 0 )); then
+      "$BIN" read
+    else
+      "$BIN" read "$@"
+    fi
     ;;
   write)
     rpm="${2:-}"
     [[ "$rpm" =~ ^[0-9]+$ ]] || { echo "usage: write <rpm>"; exit 1; }
     mn="$(fan_val F0Mn)"; mx="$(fan_val F0Mx)"
     [[ "$mn" =~ ^[0-9]+$ && "$mx" =~ ^[0-9]+$ ]] || { echo "could not read fan limits (fanless Mac?)"; exit 1; }
+    trap restore_auto EXIT INT TERM
     (( rpm > mx )) && rpm=$mx
     (( rpm < mn )) && rpm=$mn
     echo "F0Mn=$mn F0Mx=$mx -> F0Tg=$rpm (manual mode, auto-restored on exit)"
     "$BIN" writeui8 F0Md 1
-    "$BIN" writefpe2 F0Tg "$rpm"
+    "$BIN" writerpm F0Tg "$rpm"
     sleep 3
     echo "actual:"; "$BIN" read F0Ac F0Md
     ;;

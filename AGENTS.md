@@ -17,8 +17,10 @@ notarized, Homebrew cask.
 
 ## Architecture
 - SwiftUI app + root LaunchDaemon helper (`com.alpico.coolfancontrol.helper`), XPC over Mach service.
-- The helper is the **only** process with SMC access — on macOS 26 unprivileged SMC calls return
-  `kIOReturnUnsupported`; reads AND writes require root. The app never touches SMC directly.
+- The helper is the **only** process that writes SMC. Correctly formed SMC reads work unprivileged
+  on macOS 26, while writes require root. Reads remain centralized in the helper for atomic snapshots.
+- Apple Silicon fan RPM keys are `flt ` (IEEE754) on the tested M1 Mac mini, not legacy `fpe2`;
+  the codec must inspect each key's reported type rather than assuming Intel-era formats.
 - Helper installed via `SMAppService.daemon`; app must run from /Applications.
 - All testable logic lives in `Core/` (SwiftPM package; engine/rules are pure, no IOKit).
 

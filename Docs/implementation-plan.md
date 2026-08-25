@@ -29,8 +29,9 @@
 ## Hardware/OS findings from today's probe (this M1 Mac mini, macOS 26.5.2)
 
 - Machine: `Macmini9,1` (Apple M1), macOS 26.5.2 → hardware-validation target for fans (1 fan). **No battery** — battery features validated on Emre's M1 Max MacBook Pro.
-- Classic AppleSMC struct-method interface (`IOConnectCallStructMethod`, selectors 9/5) opens fine unprivileged but **every read returns `kIOReturnUnsupported` (0xe00002c7) as non-root**.
-- Conclusion: **reads AND writes require root** on this OS. All SMC traffic goes through the root helper — the GUI never touches SMC directly. (TG Pro / Macs Fan Control / Stats all use the same SMC keys on M-series, so root access is expected to work — **must be confirmed in Milestone 0**.)
+- Correct classic AppleSMC protocol is an 80-byte `SMCParamStruct`, IOConnect selector **2** for every call, with operation in `data8` (9=key info, 5=read, 6=write), and canonical big-endian numeric FourCC keys.
+- With the corrected protocol, **SMC reads work unprivileged** on macOS 26.5.2. Root is required for writes. Reads remain in the helper so snapshots (fans, temperatures, battery) are atomic and the GUI never directly accesses SMC.
+- Tested M1 Mac mini reports `FNum=1`, `F0Mn=1700`, `F0Mx=4499`, `F0Ac≈1700`, `F0Md=0`. Its fan RPM keys report type **`flt `**, not legacy `fpe2`; codecs must inspect the key's reported type.
 - Root probe binary ready at `/tmp/smc_probe` (compile from the C in this session) — needs `sudo` run by Emre.
 
 ### Key SMC keys (Apple Silicon)

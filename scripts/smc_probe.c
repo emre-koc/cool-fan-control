@@ -3,7 +3,7 @@
 // Usage:
 //   smc_probe read [KEY ...]          read keys (defaults: fans + temps + battery)
 //   smc_probe writeui8 <KEY> <0-255>  write a ui8 key (e.g. F0Md: 0=auto, 1=manual)
-//   smc_probe writefpe2 <KEY> <rpm>   write an fpe2 key (e.g. F0Tg target RPM)
+//   smc_probe writerpm <KEY> <rpm>     write an RPM using the key's actual type (flt/fpe2)
 //
 // Protocol (per beltex/SMCKit + hholzgra/smc): the IOConnectCallStructMethod selector
 // is ALWAYS 2 (KERNEL_INDEX_SMC / kSMCHandleYPCEvent); the operation is encoded in the
@@ -37,10 +37,20 @@ typedef struct {
 
 _Static_assert(sizeof(SMCKeyData_t) == 80, "SMCKeyData_t must be 80 bytes");
 
-static uint32_t fourcc(const char *s) { uint32_t v; memcpy(&v, s, 4); return v; }
+static uint32_t fourcc(const char *s) {
+    // AppleSMC expects the numeric FourCharCode in canonical big-endian order.
+    // On little-endian Macs, memcpy("FNum") would produce the reversed integer.
+    return ((uint32_t)(uint8_t)s[0] << 24) |
+           ((uint32_t)(uint8_t)s[1] << 16) |
+           ((uint32_t)(uint8_t)s[2] << 8)  |
+           ((uint32_t)(uint8_t)s[3]);
+}
 
 static void show(const char *key, uint8_t *b, size_t n, uint32_t type) {
-    char t[5] = {0}; memcpy(t, &type, 4);
+    char t[5] = {
+        (char)((type >> 24) & 0xff), (char)((type >> 16) & 0xff),
+        (char)((type >> 8) & 0xff), (char)(type & 0xff), 0
+    };
     printf("%s [%s/%zu] = ", key, t, n);
     if (n == 1) printf("%u", b[0]);
     else if (n == 2 && !memcmp(t, "fpe", 3)) printf("%.0f", (float)((b[0] << 8) | b[1]) / 4.0f);
@@ -95,7 +105,7 @@ int main(int argc, char **argv) {
             else if (rc == -2) printf("%s = MISSING\n", k);
             else printf("%s = ERR\n", k);
         }
-    } else if (!strcmp(cmd, "writeui8") || !strcmp(cmd, "writefpe2")) {
+    } else if (!strcmp(cmd, "writeui8") || !strcmp(cmd, "writerpm")) {
         if (argc < 4) { fprintf(stderr, "usage: %s %s <KEY> <value>\n", argv[0], cmd); return 2; }
         const char *k = argv[2];
         uint32_t val = (uint32_t)atoi(argv[3]);
@@ -106,12 +116,24 @@ int main(int argc, char **argv) {
         if (r != kIOReturnSuccess) { fprintf(stderr, "%s: keyInfo failed 0x%x\n", k, r); return 1; }
         in.keyInfo = out.keyInfo;
         size_t sz = out.keyInfo.dataSize;
-        if (sz == 1) {
+        char type[5] = {
+            (char)((out.keyInfo.dataType >> 24) & 0xff),
+            (char)((out.keyInfo.dataType >> 16) & 0xff),
+            (char)((out.keyInfo.dataType >> 8) & 0xff),
+            (char)(out.keyInfo.dataType & 0xff), 0
+        };
+        if (!strcmp(cmd, "writeui8") && sz == 1) {
             in.bytes[0] = val & 0xff;
-        } else if (sz == 2) {
-            if (!strcmp(cmd, "writefpe2")) val *= 4;       // fpe2: 2 fractional bits
+        } else if (!strcmp(cmd, "writerpm") && sz == 2 && !memcmp(type, "fpe2", 4)) {
+            val *= 4;                                      // fpe2: 2 fractional bits, big-endian bytes
             in.bytes[0] = (val >> 8) & 0xff; in.bytes[1] = val & 0xff;
-        } else { fprintf(stderr, "%s: unsupported dataSize %zu\n", k, sz); return 1; }
+        } else if (!strcmp(cmd, "writerpm") && sz == 4 && !memcmp(type, "flt ", 4)) {
+            float rpm = (float)val;                        // Apple Silicon fan keys use native IEEE754 float
+            memcpy(in.bytes, &rpm, sizeof(rpm));
+        } else {
+            fprintf(stderr, "%s: unsupported command/type %s/%s (size=%zu)\n", k, cmd, type, sz);
+            return 1;
+        }
         in.data8 = SMC_CMD_WRITE_BYTES;                    // 6
         memset(&out, 0, sizeof(out));
         r = smc_call(conn, &in, &out);
