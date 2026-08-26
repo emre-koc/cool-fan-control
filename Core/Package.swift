@@ -8,7 +8,10 @@ let package = Package(
         .library(name: "FanControlCore", targets: ["FanControlCore"])
     ],
     targets: [
-        .target(name: "FanControlCore"),
+        .target(
+            name: "FanControlCore",
+            linkerSettings: [.linkedFramework("IOKit", .when(platforms: [.macOS]))]
+        ),
         .testTarget(name: "FanControlCoreTests", dependencies: ["FanControlCore"])
     ]
 )
